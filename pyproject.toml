@@ -1,0 +1,15 @@
+[project]
+name = "artificial-life"
+version = "0.1.0"
+description = "A simple Python implementation of the 2D BFF universe from Computational Life: How Well-formed, Self-replicating Programs Emerge from Simple Interaction"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "numba>=0.64.0",
+    "numpy>=2.4.2",
+    "pillow>=12.1.1",
+    "tqdm>=4.67.3",
+]
+
+[dependency-groups]
+dev = []
