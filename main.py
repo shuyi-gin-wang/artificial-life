@@ -1,6 +1,10 @@
 import argparse
+import json
+from collections import Counter
 from pathlib import Path
 
+import brotli
+import imageio.v3 as iio
 import numpy as np
 from numba import njit, prange
 from PIL import Image
@@ -198,9 +202,61 @@ def save_evolution_gif(frames: list[Image.Image], output_path: str, fps: int) ->
     )
 
 
+def save_evolution_mp4(frames: list[Image.Image], output_path: str, fps: int) -> None:
+    if not frames:
+        raise ValueError("No MP4 frames were captured")
+    if fps <= 0:
+        raise ValueError("--gif-fps must be > 0")
+
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    frame_arrays = [np.array(frame) for frame in frames]
+    iio.imwrite(
+        str(output),
+        frame_arrays,
+        fps=fps,
+        codec="libx264",
+        pixelformat="yuv420p",
+    )
+
+
 def opcode_token_percent(programs: np.ndarray) -> float:
     counts = np.bincount(programs.ravel(), minlength=256)
     return 100.0 * float(counts[OPCODE_TOKENS].sum()) / float(programs.size)
+
+
+def high_order_entropy(programs: np.ndarray) -> float:
+    flat = programs.ravel()
+    n = flat.size
+    counts = np.bincount(flat, minlength=256)
+    probs = counts[counts > 0] / n
+    shannon = -float(np.sum(probs * np.log2(probs)))
+    compressed = brotli.compress(flat.tobytes(), quality=2)
+    kolmogorov = len(compressed) * 8.0 / n
+    return shannon - kolmogorov
+
+
+def unique_tape_count(programs: np.ndarray) -> int:
+    flat = programs.reshape(-1, programs.shape[-1])
+    return len(set(map(bytes, flat)))
+
+
+def extract_replicators(programs: np.ndarray, top_k: int = 20) -> list[dict]:
+    tape_size = programs.shape[-1]
+    flat = programs.reshape(-1, tape_size)
+    counts = Counter(map(bytes, flat))
+    results = []
+    for tape_bytes, count in counts.most_common(top_k):
+        tape = np.frombuffer(tape_bytes, dtype=np.uint8)
+        opcode_count = sum(1 for b in tape if b in OPCODE_TOKENS)
+        results.append({
+            "tape": list(int(b) for b in tape),
+            "count": count,
+            "frequency": count / flat.shape[0],
+            "opcode_ratio": opcode_count / tape_size,
+        })
+    return results
 
 
 def run_epochs(
@@ -209,7 +265,8 @@ def run_epochs(
     mutation_rate: float,
     rng: np.random.Generator,
     gif_every: int,
-) -> list[Image.Image]:
+    entropy_every: int = 50,
+) -> tuple[list[Image.Image], list[dict]]:
     grid_width, grid_height, tape_size = programs.shape
     num_programs = grid_width * grid_height
     flat_programs = programs.reshape(num_programs, tape_size)
@@ -222,7 +279,10 @@ def run_epochs(
     proposals = np.empty(num_programs, dtype=np.int32)
     taken = np.empty(num_programs, dtype=np.uint8)
     frames: list[Image.Image] = []
+    entropy_log: list[dict] = []
     color_lut = build_color_lut()
+    prev_hoe = None
+    transition_epoch = None
 
     pbar = tqdm(range(nepochs))
     for epoch in pbar:
@@ -238,15 +298,40 @@ def run_epochs(
         pair_count = select_pairs(order, proposals, pairs, taken)
         run_epoch_pairs(flat_programs, pairs, pair_count)
         apply_background_mutation(programs, mutation_rate, rng)
+
         if color_lut is not None and (
             (epoch + 1) % gif_every == 0 or epoch + 1 == nepochs or epoch == 0
         ):
             frames.append(
                 Image.fromarray(render_program_frame(programs, color_lut), mode="RGB")
             )
-        pbar.set_postfix_str(f"opcode={opcode_token_percent(programs):.2f}%")
 
-    return frames
+        if (epoch + 1) % entropy_every == 0 or epoch == 0 or epoch + 1 == nepochs:
+            hoe = high_order_entropy(programs)
+            utc = unique_tape_count(programs)
+            opc = opcode_token_percent(programs)
+            entry = {
+                "epoch": epoch + 1,
+                "high_order_entropy": round(hoe, 6),
+                "unique_tapes": utc,
+                "opcode_pct": round(opc, 2),
+            }
+            entropy_log.append(entry)
+
+            if transition_epoch is None and prev_hoe is not None and hoe - prev_hoe > 0.5:
+                transition_epoch = epoch + 1
+                entry["phase_transition"] = True
+                print(f"\n>>> Phase transition detected at epoch {transition_epoch}! "
+                      f"HOE: {prev_hoe:.4f} -> {hoe:.4f}")
+
+            prev_hoe = hoe
+            pbar.set_postfix_str(
+                f"opcode={opc:.1f}% hoe={hoe:.3f} uniq={utc}"
+            )
+        else:
+            pbar.set_postfix_str(f"opcode={opcode_token_percent(programs):.2f}%")
+
+    return frames, entropy_log
 
 
 if __name__ == "__main__":
@@ -285,12 +370,43 @@ if __name__ == "__main__":
         0, 256, size=(args.grid_width, args.grid_height, args.tape_size), dtype=np.uint8
     )
 
-    frames = run_epochs(
+    frames, entropy_log = run_epochs(
         programs,
         args.num_epochs,
         args.mutation_rate,
         rng,
         gif_every=args.gif_every,
     )
+
+    mp4_path = args.mp4_path
+    if mp4_path is None:
+        mp4_path = Path(args.gif_path).with_suffix(".mp4")
+
     save_evolution_gif(frames, args.gif_path, args.gif_fps)
     print(f"wrote GIF: {Path(args.gif_path).resolve()}")
+
+    save_evolution_mp4(frames, str(mp4_path), args.gif_fps)
+    print(f"wrote MP4: {Path(mp4_path).resolve()}")
+
+    # Save entropy log
+    entropy_path = Path("entropy_log.json")
+    entropy_path.write_text(json.dumps(entropy_log, indent=2))
+    print(f"wrote entropy log: {entropy_path.resolve()}")
+
+    # Extract and save replicators
+    replicators = extract_replicators(programs, top_k=50)
+    replicator_path = Path("replicators.jsonl")
+    with open(replicator_path, "w") as f:
+        for r in replicators:
+            r["seed"] = args.seed
+            r["epoch"] = args.num_epochs
+            r["mutation_rate"] = args.mutation_rate
+            f.write(json.dumps(r) + "\n")
+    print(f"wrote {len(replicators)} replicators: {replicator_path.resolve()}")
+
+    # Summary
+    top = replicators[0] if replicators else None
+    if top:
+        print(f"\nTop replicator: count={top['count']} "
+              f"freq={top['frequency']:.2%} "
+              f"opcode_ratio={top['opcode_ratio']:.2%}")
