@@ -1,4 +1,4 @@
-"""Visualize extracted replicators as colored 8x8 tiles, grouped by complexity tier."""
+"""Visualize extracted replicators as colored 8x8 tiles, grouped by fidelity tier."""
 
 import json
 import math
@@ -10,7 +10,7 @@ from PIL import Image, ImageDraw, ImageFont
 from main import NORMALIZE_LOOKUP, build_color_lut
 
 COLOR_LUT = build_color_lut()
-TIER_ORDER = ["complex", "medium", "simple"]
+TIER_ORDER = ["strong", "moderate", "weak"]
 TILE_PX = 32  # each cell in the 8x8 tape rendered at this many pixels
 CELL_PX = TILE_PX // 8  # 4px per cell
 MARGIN = 2
@@ -79,7 +79,7 @@ def make_overview(data_path: str, output_dir: str, max_per_tier: int = 200) -> N
 
     tier_data = {}
     for tier in TIER_ORDER:
-        tier_recs = [r for r in records if r.get("complexity_tier") == tier]
+        tier_recs = [r for r in records if r.get("fidelity_tier") == tier]
         tier_recs.sort(key=lambda r: -r.get("replication_score", 0))
         tier_data[tier] = tier_recs[:max_per_tier]
 
@@ -131,7 +131,7 @@ def make_overview(data_path: str, output_dir: str, max_per_tier: int = 200) -> N
 
     y = 0
     for tier, mosaic, count in sections:
-        thresholds = {"complex": 0.25, "medium": 0.05, "simple": 0.01}
+        thresholds = {"strong": 0.25, "moderate": 0.05, "weak": 0.01}
         label = f"{tier.upper()} (n={count}, rep_score>={thresholds[tier]})"
         draw.text((4, y + 4), label, fill=(200, 200, 200), font=font)
         y += label_height

@@ -1,7 +1,7 @@
-"""Extract self-replicators at different complexity levels for LLM pre-pretraining.
+"""Extract self-replicators at different fidelity levels for LLM pre-pretraining.
 
 Mirrors the NCA pre-pretraining approach: generate structured synthetic sequences,
-filter by gzip complexity, and output tokenized data for next-token prediction.
+filter by replication fidelity, and output tokenized data for next-token prediction.
 
 Usage:
     python extract.py --seeds 1 2 3 --num-epochs 7500
@@ -158,22 +158,20 @@ def run_and_snapshot(
     return all_extractions
 
 
-def assign_complexity_tier(record: dict) -> str:
-    """Bin replicators by replication fidelity and opcode structure.
+def assign_fidelity_tier(record: dict) -> str:
+    """Bin replicators by replication fidelity.
 
-    For 64-byte tapes, gzip/brotli can't discriminate (overhead > data).
-    Instead we use replication_score (how well it copies) and opcode_ratio
-    (structural complexity) — these actually vary across replicators.
+    Measures how reliably a tape copies itself onto random partners.
     """
     rep = record.get("replication_score", 0)
     if rep < 0.01:
-        return "noise"  # not a real replicator
+        return "noise"    # not a real replicator
     elif rep < 0.05:
-        return "simple"  # weak/partial replicator
+        return "weak"     # partial replicator, copies a few bytes
     elif rep < 0.25:
-        return "medium"  # moderate replicator
+        return "moderate" # copies significant structure
     else:
-        return "complex"  # strong/perfect replicator
+        return "strong"   # reliably overwrites partner with self
 
 
 def parse_seed_range(s: str) -> list[int]:
@@ -227,7 +225,7 @@ def main():
                 min_replicator_count=args.min_count,
             )
             for e in extractions:
-                e["complexity_tier"] = assign_complexity_tier(e)
+                e["fidelity_tier"] = assign_fidelity_tier(e)
             all_data.extend(extractions)
             print(f"  extracted {len(extractions)} replicator instances")
 
@@ -238,11 +236,11 @@ def main():
             f.write(json.dumps(d) + "\n")
     print(f"\nwrote {len(all_data)} total records -> {full_path}")
 
-    # Write per-tier files for complexity-filtered training
-    tiers = ("noise", "simple", "medium", "complex")
+    # Write per-tier files for fidelity-filtered training
+    tiers = ("noise", "weak", "moderate", "strong")
     tier_counts = {}
     for tier in tiers:
-        tier_data = [d for d in all_data if d["complexity_tier"] == tier]
+        tier_data = [d for d in all_data if d["fidelity_tier"] == tier]
         tier_counts[tier] = len(tier_data)
         if tier_data:
             tier_path = output_dir / f"replicators_{tier}.jsonl"
@@ -252,15 +250,15 @@ def main():
 
     # Write token-only files (one line = one tokenized tape, ready for LM training)
     # Exclude noise tier — those aren't real replicators
-    for tier in ("simple", "medium", "complex"):
-        tier_data = [d for d in all_data if d["complexity_tier"] == tier]
+    for tier in ("weak", "moderate", "strong"):
+        tier_data = [d for d in all_data if d["fidelity_tier"] == tier]
         if tier_data:
             tok_path = output_dir / f"tokens_{tier}.txt"
             with open(tok_path, "w") as f:
                 for d in tier_data:
                     f.write(" ".join(d["tokens"]) + "\n")
 
-    print(f"\nComplexity distribution:")
+    print(f"\nFidelity distribution:")
     for tier in tiers:
         print(f"  {tier:8s}: {tier_counts.get(tier, 0):6d}")
 
